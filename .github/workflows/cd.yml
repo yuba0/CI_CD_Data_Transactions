@@ -1,0 +1,88 @@
+name: CD - déploiement production
+
+# Se déclenche uniquement quand la CI a réussi sur main
+on:
+  workflow_run:
+    workflows: ["CI - pipeline data"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        run: echo "image=$(echo $IMAGE | tr '[:upper:]' '[:lower:]'):${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    # Secrets à définir dans Settings > Environments > production :
+    #   VM_HOST, VM_USER, VM_SSH_KEY, POSTGRES_PASSWORD, S3_SECRET_KEY, GHCR_PAT (read:packages)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configuration SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.VM_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Préparation des fichiers de config
+        run: |
+          mkdir deploy
+          cp docker-compose.prod.yml deploy/
+          cat > deploy/.env <<EOF
+          IMAGE=${{ needs.build-and-push.outputs.image }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          S3_SECRET_KEY=${{ secrets.S3_SECRET_KEY }}
+          PROCESS_INTERVAL=60
+          EOF
+          jq --arg s "${{ secrets.S3_SECRET_KEY }}" \
+             '.identities[0].credentials[0].secretKey = $s' infra/s3.json > deploy/s3.json
+
+      - name: Déploiement sur la VM
+        env:
+          TARGET: ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}
+        run: |
+          ssh "$TARGET" "mkdir -p ~/pipeline"
+          scp deploy/.env deploy/s3.json deploy/docker-compose.prod.yml "$TARGET":~/pipeline/
+          ssh "$TARGET" bash -s <<'EOF'
+            set -e
+            cd ~/pipeline
+            echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --wait --remove-orphans
+            docker compose -f docker-compose.prod.yml ps
+          EOF
+
+      - name: Smoke test
+        run: |
+          ssh "${{ secrets.VM_USER }}@${{ secrets.VM_HOST }}" \
+            "cd ~/pipeline && sleep 10 && \
+             test \"\$(docker inspect -f '{{.State.Running}}' \$(docker compose -f docker-compose.prod.yml ps -q processor))\" = true && \
+             docker compose -f docker-compose.prod.yml logs --tail 20 processor"

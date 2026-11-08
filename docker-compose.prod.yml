@@ -1,0 +1,53 @@
+# Setup de PRODUCTION déployé sur la VM par .github/workflows/cd.yml
+#   IMAGE=ghcr.io/<user>/<repo>:<tag> docker compose -f docker-compose.prod.yml up -d
+# Les secrets viennent du fichier .env présent sur la VM (jamais commité).
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pipeline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant}
+      POSTGRES_DB: transactions
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pipeline} -d transactions"]
+      interval: 5s
+      retries: 20
+
+  s3:
+    image: chrislusf/seaweedfs:3.97
+    restart: unless-stopped
+    command: server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports: ["127.0.0.1:8333:8333"]   # accessible uniquement depuis la VM / tunnel SSH
+    volumes:
+      - s3data:/data
+      - ./s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/status || exit 1"]
+      interval: 5s
+      retries: 30
+
+  processor:
+    image: ${IMAGE:-transactions-pipeline:local}
+    restart: unless-stopped        # relancé automatiquement s'il plante
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pipeline}:${POSTGRES_PASSWORD}@postgres:5432/transactions
+      S3_ENDPOINT: http://s3:8333
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-pipeline}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY manquant}
+      PROCESS_INTERVAL: ${PROCESS_INTERVAL:-60}
+    depends_on:
+      postgres: { condition: service_healthy }
+      s3: { condition: service_healthy }
+
+  metabase:
+    image: metabase/metabase:v0.56.9
+    restart: unless-stopped
+    ports: ["3001:3000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  s3data:
