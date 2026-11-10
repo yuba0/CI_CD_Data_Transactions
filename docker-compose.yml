@@ -28,6 +28,18 @@ services:
       timeout: 3s
       retries: 60
 
+  ollama:
+    # Petit modèle de langage local (Niveau 3) : extraction depuis du texte brut
+    #   docker compose --profile slm up -d --wait ollama
+    profiles: ["slm"]
+    image: ollama/ollama:0.40.10
+    ports: ["11434:11434"]
+    volumes: [ollama:/root/.ollama]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      retries: 30
+
   metabase:
     profiles: ["dashboard"]
     image: metabase/metabase:v0.56.9
@@ -35,3 +47,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+volumes:
+  ollama:

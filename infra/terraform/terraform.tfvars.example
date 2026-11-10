@@ -1,0 +1,4 @@
+# cp terraform.tfvars.example terraform.tfvars  (terraform.tfvars n'est pas commité)
+processor_image = "ghcr.io/yuba0/ci_cd_data_transactions:latest"
+# ssh_cidr       = "1.2.3.4/32"
+# ssh_public_key = "ssh-ed25519 AAAA... moi@mac"

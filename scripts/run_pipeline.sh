@@ -29,7 +29,7 @@ step "5. Traitement + insertion"
 $PY -m pipeline process --source s3
 
 step "6. Re-run (idempotence)"
-$PY -m pipeline process --source s3 2>&1 | tee /dev/stderr | grep -q "'processed': 0, 'skipped': 3"
+$PY -m pipeline process --source s3 2>&1 | tee /dev/stderr | grep -q "'processed': 0, 'skipped': 4"
 
 step "7. Tests d'intégration"
 $PY -m pytest tests/integration -v -o log_cli=true -o log_cli_level=WARNING

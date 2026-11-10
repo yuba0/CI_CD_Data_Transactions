@@ -1,0 +1,30 @@
+# Lancement régulier du traitement : toutes les 5 minutes.
+# Les fichiers déjà traités sont ignorés (registre processed_files).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: processor
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid        # jamais deux traitements en parallèle
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2              # le Job est relancé s'il échoue
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: processor
+              image: pipeline
+              args: ["python", "-m", "pipeline", "process", "--source", "s3"]
+              env:
+                - { name: S3_ENDPOINT, value: "http://s3:8333" }
+                - { name: S3_ACCESS_KEY, value: pipeline }
+                - name: S3_SECRET_KEY
+                  valueFrom: { secretKeyRef: { name: pipeline-secrets, key: S3_SECRET_KEY } }
+                - name: POSTGRES_PASSWORD
+                  valueFrom: { secretKeyRef: { name: pipeline-secrets, key: POSTGRES_PASSWORD } }
+                - name: DATABASE_URL
+                  value: postgresql://pipeline:$(POSTGRES_PASSWORD)@postgres:5432/transactions

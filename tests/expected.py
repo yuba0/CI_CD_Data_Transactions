@@ -49,3 +49,49 @@ RECEIVED_BY_IBAN = {
 FLAGGED_AMOUNTS = sorted(
     [D("7500.50"), D("5000.01"), D("8000.00"), D("6200.00"), D("12000.00"), D("5500.00")]
 )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline complète = 3 CSV + 1 relevé image lu par OCR (releve_2026-01-04.png)
+#   FR1 -> DE1  1500.00
+#   DE1 -> IT1  9100.00  (flag)
+#   IT1 -> FR2   320.50
+#   ES1 -> FR3  5001.00  (flag)
+# ---------------------------------------------------------------------------
+PIPELINE_FILES = dict(FILES, **{"releve_2026-01-04.png": 4})
+PIPELINE_TOTAL_TRANSACTIONS = 22
+PIPELINE_TOTAL_AMOUNT = D("76872.74")      # 60951.24 + 15921.50
+
+PIPELINE_SENT_BY_IBAN = {
+    FR1: D("16650.00"),   # 15150 + 1500
+    FR2: D("12350.75"),
+    DE1: D("29600.50"),   # 20500.50 + 9100
+    ES1: D("12601.00"),   # 7600 + 5001
+    IT1: D("5570.49"),    # 5249.99 + 320.50
+    FR3: D("100.00"),
+}
+
+PIPELINE_SENT_BY_BANK = {
+    "Banque Alpha": D("16750.00"),
+    "Banque Beta": D("12350.75"),
+    "Banque Gamma": D("29600.50"),
+    "Banque Delta": D("12601.00"),
+    "Banque Epsilon": D("5570.49"),
+}
+
+PIPELINE_RECEIVED_BY_IBAN = {
+    DE1: D("13750.73"),   # 12250.73 + 1500
+    FR1: D("16450.50"),
+    ES1: D("25100.00"),
+    IT1: D("11100.00"),   # 2000 + 9100
+    FR2: D("5470.51"),    # 5150.01 + 320.50
+    FR3: D("5001.00"),
+}
+
+PIPELINE_FLAGGED_AMOUNTS = sorted(FLAGGED_AMOUNTS + [D("9100.00"), D("5001.00")])
+
+# Texte brut lu par le SLM (message_2026-01-05.txt)
+TEXT_TRANSACTIONS = [
+    ("2026-01-05T08:30:00", FR2, "FR", "Banque Beta", ES1, "ES", D("2750.00"), False),
+    ("2026-01-05T16:20:00", IT1, "IT", "Banque Epsilon", DE1, "DE", D("6400.00"), True),
+]

@@ -6,15 +6,13 @@ Séparées volontairement des fonctions de traitement (processing.py).
 """
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-from . import config, faults
+from . import config, extractors, faults
 from .retry import retry
 
 log = logging.getLogger(__name__)
@@ -30,7 +28,8 @@ class RawFile:
         return hashlib.sha256(self.content).hexdigest()
 
     def rows(self) -> List[Dict[str, str]]:
-        return list(csv.DictReader(io.StringIO(self.content.decode("utf-8"))))
+        # CSV, image (OCR) ou texte brut (SLM) -> lignes au format CSV
+        return extractors.extract_rows(self.key, self.content)
 
 
 class LocalSource:
@@ -38,7 +37,8 @@ class LocalSource:
         self.directory = Path(directory)
 
     def list_keys(self) -> List[str]:
-        return sorted(p.name for p in self.directory.glob("*.csv"))
+        return sorted(p.name for p in self.directory.iterdir()
+                      if p.is_file() and extractors.is_supported(p.name))
 
     def fetch(self, key: str) -> RawFile:
         return RawFile(key=key, content=(self.directory / key).read_bytes())
@@ -50,10 +50,11 @@ def s3_client():
 
     return boto3.client(
         "s3",
-        endpoint_url=config.S3_ENDPOINT,
-        aws_access_key_id=config.S3_ACCESS_KEY,
-        aws_secret_access_key=config.S3_SECRET_KEY,
-        region_name="us-east-1",
+        # endpoint vide = vrai S3 AWS ; clés vides = rôle IAM de la VM (Terraform)
+        endpoint_url=config.S3_ENDPOINT or None,
+        aws_access_key_id=config.S3_ACCESS_KEY or None,
+        aws_secret_access_key=config.S3_SECRET_KEY or None,
+        region_name=config.S3_REGION,
         # on désactive les retries internes de boto3 pour que notre
         # mécanisme de retry soit visible et maîtrisé
         config=Config(retries={"max_attempts": 1}, connect_timeout=3, read_timeout=10),
@@ -78,7 +79,7 @@ class S3Source:
         keys: List[str] = []
         paginator = self.client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix):
-            keys += [o["Key"] for o in page.get("Contents", []) if o["Key"].endswith(".csv")]
+            keys += [o["Key"] for o in page.get("Contents", []) if extractors.is_supported(o["Key"])]
         return sorted(keys)
 
     def fetch(self, key: str) -> RawFile:
@@ -106,13 +107,15 @@ def ensure_bucket(client, bucket: str) -> None:
 
 def upload_directory(directory: str | Path, client=None, bucket: str = None,
                      prefix: str = None) -> List[str]:
-    """Niveau 2.2 - dépose les CSV générés dans le S3."""
+    """Niveau 2.2 - dépose les fichiers générés (CSV, images, textes) dans le S3."""
     client = client or s3_client()
     bucket = bucket or config.S3_BUCKET
     prefix = prefix if prefix is not None else config.S3_PREFIX
     ensure_bucket(client, bucket)
     keys = []
-    for path in sorted(Path(directory).glob("*.csv")):
+    for path in sorted(Path(directory).iterdir()):
+        if not extractors.is_supported(path.name):
+            continue
         key = f"{prefix}{path.name}"
         client.put_object(Bucket=bucket, Key=key, Body=path.read_bytes())
         log.info("upload %s -> s3://%s/%s", path, bucket, key)

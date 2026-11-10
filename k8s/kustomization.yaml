@@ -1,0 +1,14 @@
+# Déploiement Kubernetes de la production : kubectl apply -k k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: pipeline
+resources:
+  - namespace.yaml
+  - postgres.yaml
+  - s3.yaml
+  - processor-cronjob.yaml
+images:
+  # remplacée par la CD : kustomize edit set image pipeline=ghcr.io/...:sha
+  - name: pipeline
+    newName: transactions-pipeline
+    newTag: local

@@ -19,6 +19,8 @@ docker compose --profile dashboard up -d   # dashboard Metabase : http://localho
 | Fichier | Rôle |
 |---|---|
 | `pipeline/generate.py` | 1.1 Génère 3 CSV (5, 6, 7 transactions), données **fixes** |
+| `pipeline/generate_extra.py` | 3 Génère un relevé image (OCR) et un texte brut (SLM) |
+| `pipeline/extractors.py` | 3 CSV / OCR / SLM → lignes au format CSV |
 | `pipeline/processing.py` | 1.2 Fonctions **pures** : sommes, flag > 5000, validation |
 | `pipeline/loader.py` | 1.2 / 2.3 Chargement (local ou S3) + 2.4 retry du téléchargement |
 | `sql/schema.sql` | 1.3 Schéma relationnel |
@@ -29,7 +31,9 @@ docker compose --profile dashboard up -d   # dashboard Metabase : http://localho
 | `tests/expected.py` | Résultats attendus **calculés à la main** |
 | `tests/unit/` | Tests des fonctions pures et du retry |
 | `tests/integration/` | 1.5 Vérifie le contenu de la base, le retry et l'idempotence |
-| `Dockerfile`, `docker-compose.prod.yml`, `.github/workflows/cd.yml` | Niveau 3 : CD |
+| `Dockerfile`, `docker-compose.prod.yml`, `k8s/`, `.github/workflows/cd.yml` | Niveau 3 : CD Docker, VM et Kubernetes |
+| `tests/slm/` | Niveau 3 : test de l'extraction par le petit modèle |
+| `infra/terraform/` | Niveau 3 : S3, RDS et EC2 sur AWS |
 
 Format CSV : `datetime_transaction, iban_origine, pays_source, banque_source, iban_destinataire, pays_destinataire, montant`.
 La colonne `montant` est ajoutée au format de l'énoncé, car les traitements en ont besoin.
@@ -58,7 +62,7 @@ Voir `ci.yml` : tests unitaires → démarrage S3 + DB → generate → upload �
 
 ### 1.5 Test d'intégration
 `tests/integration/test_database_content.py` compare la base aux valeurs de `tests/expected.py` :
-18 transactions, total 60951.24, sommes par IBAN, par banque et par destinataire, et 6 transactions flaggées.
+22 transactions (3 CSV et 1 image), total 76872.74, sommes par IBAN, par banque et par destinataire, et 8 transactions flaggées.
 
 ### 1.6 Scénario d'échec (captures d'écran)
 Fais une capture d'écran de chaque étape et range-la dans `docs/screenshots/`.
@@ -95,11 +99,62 @@ Ces garde-fous sont testés par `test_retry_idempotence.py`, et l'étape 6 de la
 - 2.3 : `process --source s3` lit depuis le S3 (`S3Source`)
 - 2.4 : `_fetch_with_retry` réessaie le téléchargement en cas d'erreur réseau. Le test `test_s3_download_retry` le vérifie avec `FAIL_S3_GET_TIMES=2`.
 
-## Niveau 3 : CD sur une VM avec Docker
-- `Dockerfile` : image du traitement. Par défaut, elle tourne en boucle (`--loop`) et vérifie le S3 toutes les `PROCESS_INTERVAL` secondes.
-  `restart: unless-stopped` la relance si elle plante.
-- `docker-compose.prod.yml` : S3, PostgreSQL (volumes persistants), le processor et Metabase.
-- `cd.yml` : se déclenche quand la CI est verte sur `main`. Il construit l'image, la pousse sur GHCR, la copie sur la VM via SSH, lance `docker compose up -d` et termine par un smoke test.
+## Niveau 3 : les 4 améliorations
 
-Prérequis sur la VM : Docker et l'accès SSH par clé. Dans GitHub, crée un environment `production` avec les secrets
-`VM_HOST`, `VM_USER`, `VM_SSH_KEY`, `POSTGRES_PASSWORD`, `S3_SECRET_KEY` et `GHCR_PAT`.
+Vue d'ensemble des jobs GitHub Actions :
+
+```
+CI : unit-tests ─┬─► pipeline (CSV + OCR, S3, Postgres, tests d'intégration)
+                 └─► slm      (Ollama + qwen2.5:1.5b, extraction du texte brut)
+     terraform   (fmt + validate de l'infra AWS)
+
+CD (si la CI est verte sur main) : build-and-push (GHCR) ─┬─► deploy-kubernetes (kind + smoke test)
+                                                          └─► deploy-vm (optionnel, DEPLOY_VM=true)
+```
+
+### 3.1 CD avec Docker vers Kubernetes et/ou une VM
+- `Dockerfile` : l'image du traitement, qui contient Tesseract.
+- **Kubernetes** (`k8s/`) : PostgreSQL en StatefulSet, SeaweedFS en Deployment (avec un PVC), et le traitement en
+  **CronJob toutes les 5 minutes**. `concurrencyPolicy: Forbid` interdit deux traitements en parallèle, et
+  `backoffLimit: 2` relance le Job s'il échoue.
+  - `scripts/deploy_k8s.sh --smoke-test` déploie, dépose les fichiers dans le S3 du cluster, lance le CronJob tout de suite,
+    vérifie qu'il y a 22 transactions en base, puis vérifie que la 2e exécution ne retraite rien.
+  - Le job `deploy-kubernetes` de la CD crée un cluster **kind** dans le runner, y charge l'image publiée sur GHCR et lance ce script.
+  - En local : `kind create cluster --name tp-cicd && kind load docker-image transactions-pipeline:local --name tp-cicd`,
+    puis `IMAGE=transactions-pipeline:local POSTGRES_PASSWORD=x S3_SECRET_KEY=y PY=.venv/bin/python ./scripts/deploy_k8s.sh --smoke-test`.
+- **VM** (`docker-compose.prod.yml`) : S3, PostgreSQL, le processor en boucle (`restart: unless-stopped`) et Metabase.
+  Le job `deploy-vm` est désactivé par défaut. Pour l'activer, crée la variable de dépôt `DEPLOY_VM=true`, puis l'environment `production` avec les secrets
+  `VM_HOST`, `VM_USER`, `VM_SSH_KEY`, `POSTGRES_PASSWORD`, `S3_SECRET_KEY` et `GHCR_PAT`.
+
+### 3.2 OCR : transactions contenues dans des images
+- `generate_extra.py` dessine un relevé PNG (`releve_2026-01-04.png`) avec 4 transactions.
+- `extractors.py` : Tesseract (`--psm 6`) lit l'image, puis `parse_ocr_text` (une fonction pure) découpe chaque ligne, retire les espaces
+  que l'OCR insère dans les IBAN et vérifie le format de l'IBAN et du code pays. Une ligne mal lue donne une erreur au lieu d'une donnée fausse.
+- Le relevé fait partie de la pipeline principale : la base attendue contient **22 transactions** (18 issues des CSV et 4 de l'image).
+
+### 3.3 Petit modèle de langage : transactions contenues dans du texte brut
+- `message_2026-01-05.txt` décrit 2 virements en français libre (« le 2026-01-05 vers 16h20, le client du compte … a envoyé 6400.00 EUR … »).
+- `ask_slm` interroge **Ollama** avec le modèle `qwen2.5:1.5b` :
+  - le schéma JSON imposé par `format` oblige une sortie structurée ;
+  - `temperature=0` et `seed=42` rendent la réponse reproductible ;
+  - l'appel a un retry si Ollama ne répond pas.
+- **Garde-fou contre les hallucinations** : chaque IBAN et chaque montant renvoyé doit apparaître mot pour mot dans le texte source.
+  Sinon le fichier est rejeté. C'est testé dans `tests/unit/test_extractors.py`.
+- En local : `docker compose --profile slm up -d --wait ollama && docker compose exec ollama ollama pull qwen2.5:1.5b`,
+  puis `python -m pipeline generate --texts` et `pytest tests/slm`.
+
+### 3.4 Terraform : production dans le cloud (AWS)
+`infra/terraform/` décrit :
+- un **bucket S3**, chiffré et sans accès public ;
+- une base **RDS PostgreSQL 16** accessible seulement depuis la VM ;
+- une **VM EC2** qui installe Docker au démarrage (cloud-init) et lance le conteneur de traitement en boucle. Elle lit le S3
+  avec un **rôle IAM**, sans clé d'accès stockée.
+
+```bash
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars   # renseigner l'image (le paquet GHCR doit être public)
+terraform init && terraform plan && terraform apply
+aws s3 cp ../../data/ s3://$(terraform output -raw bucket)/incoming/ --recursive
+terraform destroy   # à la fin du TP, pour ne pas payer
+```
+La CI vérifie `terraform fmt` et `terraform validate`, ce qui ne demande aucun compte AWS.

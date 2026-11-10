@@ -14,7 +14,7 @@ import sys
 import time
 from typing import Dict
 
-from . import config, db, generate, loader
+from . import config, db, generate, generate_extra, loader
 from .processing import InvalidTransaction, process
 
 log = logging.getLogger("pipeline")
@@ -62,8 +62,10 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="pipeline")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("generate", help="génère les CSV de test")
+    p = sub.add_parser("generate", help="génère les fichiers de test")
     p.add_argument("--out", default="data")
+    p.add_argument("--no-images", action="store_true", help="sans relevé image (OCR)")
+    p.add_argument("--texts", action="store_true", help="avec texte brut (SLM)")
 
     p = sub.add_parser("upload", help="dépose les CSV dans le S3")
     p.add_argument("--dir", default="data")
@@ -79,7 +81,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "generate":
-        for path in generate.generate(args.out):
+        paths = generate.generate(args.out)
+        if not args.no_images:
+            paths += generate_extra.generate_images(args.out)
+        if args.texts:
+            paths += generate_extra.generate_texts(args.out)
+        for path in paths:
             log.info("généré %s", path)
     elif args.cmd == "upload":
         loader.upload_directory(args.dir)
